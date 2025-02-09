@@ -623,7 +623,7 @@ ssh_channel login_channel(ssh_session & ses) {
     if (verbosity) {
         printf("+++ Login shell established\n");
     }
-    printf("ssh-Login-Time: %21s\n", fmtnum(nsec_diff(t0, t1), -9, "s").c_str());
+    //printf("ssh-Login-Time: %21s\n", fmtnum(nsec_diff(t0, t1), -9, "s").c_str());
 
     return chn;
 }
@@ -646,16 +646,13 @@ int run_echo_test(ssh_channel & chn) {
     }
 
     //  Send one character at a time, read back the response, getting timing data as we go
-    uint64_t              tot_latency = 0;
     char                  wbuf[]      = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ\n";
     char                  rbuf[2];
-    std::vector<uint64_t> latencies;
     uint64_t              endt   = get_time() + ((uint64_t)(time_limit) * GIGA);
     uint64_t              tv     = 0;
     int                   log_hz = 60;
     uint64_t              log_t  = GIGA / log_hz;
-    for (int n = 0; (!char_limit || (n < char_limit))
-                 && (!time_limit || (get_time() <= endt)); n++) {
+    for (int n = 0; true; n++) {
 
         uint64_t tw = get_time();
 
@@ -676,66 +673,17 @@ int run_echo_test(ssh_channel & chn) {
         }
 
         uint64_t tr = get_time();
-
         uint64_t latency = nsec_diff(tw, tr);
-        latencies.push_back(latency);
-        tot_latency += latency;
-        
-        // Update output at 60hz
-        // If using -vv, send every ping
-        bool update_output = (nsec_diff(tv, tr) > log_t) || (verbosity >= 2);
-        
-        if (update_output) {
-            tv = tr;
-            int nchars = 37;
-            nchars-=printf("Ping ");
-            nchars-=printf("%d/%d:", n, char_limit);
-            printf("%*s\r", nchars, fmtnum(latency, -9, "s").c_str());
-            if (verbosity >= 2) printf("\n");
-            fflush(stdout);
-        }
+
+        struct timespec tz;
+        clock_gettime(CLOCK_REALTIME, &tz);
+        uint64_t ts = (tz.tv_sec * GIGA + tz.tv_nsec);
+
+        //printf("{ \"timestamp\": %lu, \"latency\": %lu }\n", ts, latency);
+        printf("%lu,%lu\n", ts, latency);
+        fflush(stdout);
     }
 
-    int num_sent = latencies.size();
-    if (!num_sent) {
-        fprintf(stderr, "*** Unable to get any echos in given time\n");
-        return SSH_ERROR;
-    }
-    if (num_sent < 13) {
-        printf("-*- Warning: too few echos to be statistically valid\n");
-    }
-    uint64_t avg_latency = tot_latency / num_sent;
-    uint64_t med_latency;
-    std::sort(latencies.begin(), latencies.end());
-    uint64_t min_latency = latencies[0];
-    uint64_t max_latency = latencies[num_sent - 1];
-    if (num_sent & 1) {
-        med_latency = latencies[(num_sent + 1) / 2 - 1];
-    }
-    else {
-        med_latency = (latencies[num_sent / 2 - 1] + latencies[(num_sent + 1) / 2 - 1]) / 2;
-    }
-    uint64_t stddev = standard_deviation(latencies, avg_latency);
-    printf("Minimum-Latency:   %18s\n", fmtnum(min_latency, -9, "s").c_str());
-    printf("Median-Latency:    %18s\n", fmtnum(med_latency, -9, "s").c_str());
-    printf("Average-Latency:   %18s\n", fmtnum(avg_latency, -9, "s").c_str());
-    printf("Average-Deviation: %18s\n", fmtnum(stddev,      -9, "s").c_str());
-    printf("Maximum-Latency:   %18s\n", fmtnum(max_latency, -9, "s").c_str());
-    printf("Echo-Count:        %17s\n", fmtnum(num_sent,     0, "B").c_str());
-
-    if (ping_summary) {
-        printf("rtt min/avg/max/mdev = %ld.%03ld/%lu.%03ld/%ld.%03ld/%ld.%03ld ms\n",
-               (long)min_latency / 1000000, (long)(min_latency / 1000) % 1000,
-               (long)avg_latency / 1000000, (long)(avg_latency / 1000) % 1000,
-               (long)max_latency / 1000000, (long)(max_latency / 1000) % 1000,
-               (long)stddev / 1000000, (long)(stddev / 1000) % 1000);
-    }
-
-    // Terminate the echo responder
-    // TODO
-    if (verbosity) {
-        printf("+++ Echo responder finished\n");
-    }
     return SSH_OK;
 }
 
