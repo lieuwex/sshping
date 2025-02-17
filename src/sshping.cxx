@@ -662,7 +662,7 @@ int run_echo_test(ssh_channel & chn) {
             fprintf(stderr, "\n*** write put %d bytes, expected 1\n", nbytes);
             return SSH_ERROR;
         }
-        nbytes = ssh_channel_read_timeout(chn, &rbuf, 1, /*is-stderr*/ 0, 2500);
+        nbytes = ssh_channel_read_timeout(chn, &rbuf, 1, /*is-stderr*/ 0, -1);
         if (nbytes != 1) {
             fprintf(stderr, "\n*** read got %d bytes, expected 1\n", nbytes);
             return SSH_ERROR;
