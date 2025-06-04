@@ -45,6 +45,8 @@
 #include <time.h>
 #include <vector>
 
+#include "udp_listener.hxx"
+
 #if (LIBSSH_VERSION_MAJOR == 0) && (LIBSSH_VERSION_MINOR < 6)
   #error "*** libssh must be version 0.6 or later"
 #endif
@@ -217,7 +219,7 @@ const option::Descriptor usage[] = {
           *stringp = p + 1;
       }
       return start;
-  } 
+  }
 
   // Replacement for the clock_gettime UNIX method
   uint64_t get_time() {
@@ -519,8 +521,8 @@ ssh_session begin_session() {
     if (verbosity) {
         printf("+++ Attempting connection to %s:%s", addr, port);
         if (user) printf(" as user '%s'", user);
-        printf("\n");            
-    } 
+        printf("\n");
+    }
 
     int rc = ssh_init();
     if (rc != SSH_OK) {
@@ -629,7 +631,9 @@ ssh_channel login_channel(ssh_session & ses) {
 }
 
 // Run a single-character-at-a-time echo test
-int run_echo_test(ssh_channel & chn) {
+int run_echo_test(ssh_channel &chn) {
+	UdpListener l(10'0000);
+	l.start(34254);
 
     // Start the echo server
     echo_cmd += "\n";
@@ -645,30 +649,120 @@ int run_echo_test(ssh_channel & chn) {
         printf("+++ Echo responder started\n");
     }
 
-    //  Send one character at a time, read back the response, getting timing data as we go
-    char                  wbuf[]      = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ\n";
-    char                  rbuf[2];
-    uint64_t              endt   = get_time() + ((uint64_t)(time_limit) * GIGA);
-    uint64_t              tv     = 0;
-    int                   log_hz = 60;
-    uint64_t              log_t  = GIGA / log_hz;
-    for (int n = 0; true; n++) {
+    char wbuf[] = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ\n";
+    char rbuf[2];
+    uint64_t current_initial_time = get_time();
+    uint64_t endt = current_initial_time + ((uint64_t)(time_limit * GIGA)); // time_limit is in seconds
 
-        uint64_t tw = get_time();
+    const uint64_t TBF_BUCKET_CAPACITY_BYTES = 16 * 1024; // 16KB burst capacity
+    uint64_t tbf_tokens = TBF_BUCKET_CAPACITY_BYTES;     // Start with a full bucket to allow initial burst.
+    uint64_t tbf_last_update_ns = current_initial_time;  // Initialize timestamp for TBF.
 
-        int i = n % (sizeof(wbuf) - 2);
+    for (int n = 0; /* loop until endt or error */; n++) {
+        if (get_time() >= endt) {
+            if (verbosity > 0) {
+                printf("+++ Time limit reached\n");
+            }
+            break;
+        }
+
+        const int bytes_to_send_this_op = 1;
+        bool token_acquired = false;
+        bool expired_in_tbf_wait = false;
+
+        while (!token_acquired) {
+            uint64_t tbf_current_time_ns = get_time();
+
+            // Check for overall time limit inside the TBF wait loop
+            if (tbf_current_time_ns >= endt) {
+                if (verbosity > 0) {
+                    printf("+++ Time limit reached during TBF wait\n");
+                }
+                expired_in_tbf_wait = true;
+                break; // Exit TBF wait loop
+            }
+
+            uint64_t delta_ns = nsec_diff(tbf_last_update_ns, tbf_current_time_ns);
+            tbf_last_update_ns = tbf_current_time_ns; // Mark time as accounted for
+
+            int64_t current_rate_bps = l.arbiter_bandwidth.load();
+
+            if (current_rate_bps > 0) {
+                // Add new tokens based on elapsed time and rate
+                double new_tokens_to_add_precise = (double)current_rate_bps * delta_ns / GIGA;
+                tbf_tokens += (uint64_t)new_tokens_to_add_precise;
+
+                // Cap tokens at bucket capacity
+                if (tbf_tokens > TBF_BUCKET_CAPACITY_BYTES) {
+                    tbf_tokens = TBF_BUCKET_CAPACITY_BYTES;
+                }
+            }
+            // If current_rate_bps is zero or negative, no new tokens are generated.
+
+            if (tbf_tokens >= bytes_to_send_this_op) {
+                tbf_tokens -= bytes_to_send_this_op;
+                token_acquired = true;
+            } else {
+                // Not enough tokens, calculate wait time
+                uint64_t ns_to_wait;
+                if (current_rate_bps > 0) {
+                    // Time (in ns) to generate 1 byte/token at current_rate_bps
+                    ns_to_wait = GIGA / (uint64_t)current_rate_bps;
+                    if (ns_to_wait == 0 && current_rate_bps > 0) { // Rate is very high
+                        ns_to_wait = 1; // Minimum theoretical wait if rate is > GIGA Bps
+                    }
+
+                    // Apply a minimum practical sleep duration (e.g., 0.1 ms)
+                    // This prevents busy-spinning if calculated ns_to_wait is too small.
+                    const uint64_t MIN_PRACTICAL_SLEEP_NS = 100000; // 0.1 milliseconds
+                    if (ns_to_wait < MIN_PRACTICAL_SLEEP_NS) {
+                        ns_to_wait = MIN_PRACTICAL_SLEEP_NS;
+                    }
+                } else {
+                    // Rate is zero or negative, wait for a default polling interval (e.g., 10 ms)
+                    ns_to_wait = 10 * 1000000; // 10 milliseconds
+                }
+
+                // Ensure the sleep doesn't extend beyond the overall time limit 'endt'
+                uint64_t expected_wakeup_time = tbf_current_time_ns + ns_to_wait;
+                if (expected_wakeup_time > endt) {
+                    if (endt > tbf_current_time_ns) {
+                        ns_to_wait = endt - tbf_current_time_ns; // Sleep only for the remaining time
+                    } else {
+                        ns_to_wait = 0; // Already past end time, don't sleep
+                    }
+                }
+
+                if (ns_to_wait > 0) {
+                    struct timespec sleep_duration;
+                    sleep_duration.tv_sec = ns_to_wait / GIGA;
+                    sleep_duration.tv_nsec = ns_to_wait % GIGA;
+                    nanosleep(&sleep_duration, NULL);
+                }
+                // If ns_to_wait is 0 (e.g., endt reached or extremely high rate),
+                // the loop will iterate immediately to re-check tokens and time limits.
+            }
+        }
+
+        if (expired_in_tbf_wait) {
+            break;
+        }
+
+        uint64_t tw = get_time(); // Get time just before writing, after TBF wait
+
+        int i = n % (sizeof(wbuf) - 2); // -2 to exclude null terminator and the newline itself if handled by echo_cmd
         nbytes = ssh_channel_write(chn, &wbuf[i], 1);
         if (nbytes != 1) {
             fprintf(stderr, "\n*** write put %d bytes, expected 1\n", nbytes);
             return SSH_ERROR;
         }
-        nbytes = ssh_channel_read_timeout(chn, &rbuf, 1, /*is-stderr*/ 0, -1);
+        nbytes = ssh_channel_read_timeout(chn, &rbuf, 1, /*is-stderr*/ 0, -1 /*timeout, e.g. 1000ms*/);
         if (nbytes != 1) {
-            fprintf(stderr, "\n*** read got %d bytes, expected 1\n", nbytes);
+            fprintf(stderr, "\n*** read got %d bytes, expected 1 (got %.*s)\n", nbytes, nbytes > 0 ? nbytes : 0, rbuf);
             return SSH_ERROR;
         }
         if (wbuf[i] != rbuf[0]) {
-            fprintf(stderr, "\n*** Echo failed, sent %%x%2.2x yet got %%x%2.2x\n", wbuf[i], rbuf[0]);
+            fprintf(stderr, "\n*** Echo failed, sent 0x%02x yet got 0x%02x\n", (unsigned char)wbuf[i], (unsigned char)rbuf[0]);
             return SSH_ERROR;
         }
 
@@ -676,13 +770,12 @@ int run_echo_test(ssh_channel & chn) {
         uint64_t latency = nsec_diff(tw, tr);
 
         struct timespec tz;
-        clock_gettime(CLOCK_REALTIME, &tz);
-        uint64_t ts = (tz.tv_sec * GIGA + tz.tv_nsec);
+        clock_gettime(CLOCK_REALTIME, &tz); // CLOCK_REALTIME for wall clock timestamp
+        uint64_t ts = ((uint64_t)tz.tv_sec * GIGA + tz.tv_nsec);
 
-        //printf("{ \"timestamp\": %lu, \"latency\": %lu }\n", ts, latency);
         printf("%lu,%lu\n", ts, latency);
         fflush(stdout);
-    }
+    } // End main for-loop
 
     return SSH_OK;
 }
