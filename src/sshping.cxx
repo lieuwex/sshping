@@ -652,35 +652,17 @@ int run_echo_test(ssh_channel &chn) {
     char wbuf[] = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ\n";
     char rbuf[2];
     uint64_t current_initial_time = get_time();
-    uint64_t endt = current_initial_time + ((uint64_t)(time_limit * GIGA)); // time_limit is in seconds
 
     const uint64_t TBF_BUCKET_CAPACITY_BYTES = 16 * 1024; // 16KB burst capacity
     uint64_t tbf_tokens = TBF_BUCKET_CAPACITY_BYTES;     // Start with a full bucket to allow initial burst.
     uint64_t tbf_last_update_ns = current_initial_time;  // Initialize timestamp for TBF.
 
-    for (int n = 0; /* loop until endt or error */; n++) {
-        if (get_time() >= endt) {
-            if (verbosity > 0) {
-                printf("+++ Time limit reached\n");
-            }
-            break;
-        }
-
+    for (int n = 0; true; n++) {
         const int bytes_to_send_this_op = 1;
         bool token_acquired = false;
-        bool expired_in_tbf_wait = false;
 
         while (!token_acquired) {
             uint64_t tbf_current_time_ns = get_time();
-
-            // Check for overall time limit inside the TBF wait loop
-            if (tbf_current_time_ns >= endt) {
-                if (verbosity > 0) {
-                    printf("+++ Time limit reached during TBF wait\n");
-                }
-                expired_in_tbf_wait = true;
-                break; // Exit TBF wait loop
-            }
 
             uint64_t delta_ns = nsec_diff(tbf_last_update_ns, tbf_current_time_ns);
             tbf_last_update_ns = tbf_current_time_ns; // Mark time as accounted for
@@ -739,13 +721,7 @@ int run_echo_test(ssh_channel &chn) {
                     sleep_duration.tv_nsec = ns_to_wait % GIGA;
                     nanosleep(&sleep_duration, NULL);
                 }
-                // If ns_to_wait is 0 (e.g., endt reached or extremely high rate),
-                // the loop will iterate immediately to re-check tokens and time limits.
             }
-        }
-
-        if (expired_in_tbf_wait) {
-            break;
         }
 
         uint64_t tw = get_time(); // Get time just before writing, after TBF wait
