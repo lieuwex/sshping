@@ -14,12 +14,14 @@
 
 class UdpListener {
   public:
-	std::atomic<int64_t> arbiter_bandwidth;
-
 	UdpListener(int64_t rate) { arbiter_bandwidth.store(rate); }
 	~UdpListener() { stop(); }
 
-	void start(unsigned short port) {
+	int64_t get_bandwidth() {
+		return arbiter_bandwidth.load(std::memory_order_relaxed);
+	}
+
+	void start() {
 		udp_fd = socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK, 0);
 		if (udp_fd == -1) {
 			throw std::runtime_error(
@@ -29,8 +31,8 @@ class UdpListener {
 		struct sockaddr_in router_addr = {0};
 		router_addr.sin_family = AF_INET;
 		router_addr.sin_addr.s_addr = htonl(INADDR_ANY);
-		router_addr.sin_port = htons(port);
-		if (inet_pton(AF_INET, "192.168.121.33", &router_addr.sin_addr) != 1) {
+		router_addr.sin_port = htons(7070);
+		if (inet_pton(AF_INET, "127.0.0.1", &router_addr.sin_addr) != 1) {
 			close(udp_fd);
 			throw std::runtime_error("failed to parse IP");
 		}
@@ -75,8 +77,10 @@ class UdpListener {
 	std::thread thread;
 	std::atomic<bool> running {false};
 
-	const uint8_t PONG[1] = {2};
-	const uint8_t RELEASE[1] = {3};
+	std::atomic<int64_t> arbiter_bandwidth;
+
+	const uint8_t PONG[1] = {3};
+	const uint8_t RELEASE[1] = {2};
 
 	struct Request {
 		int64_t min_bandwidth;
@@ -105,8 +109,19 @@ class UdpListener {
 		std::vector<uint8_t> buffer;
 	};
 
-	int64_t read_int64_be(unsigned char *b, size_t sz) {
-		assert(sz >= 8);
+	int8_t read_int8_be(unsigned char **cur, size_t *sz) {
+		int8_t res = **cur;
+		(*cur)++;
+		(*sz)--;
+		return res;
+	}
+	int64_t read_int64_be(unsigned char **cur, size_t *sz) {
+		assert((*sz) >= 8);
+
+		unsigned char *b = *cur;
+		(*cur) += 8;
+		(*sz) -= 8;
+
 		return int64_t(b[0]) << 56 | int64_t(b[1]) << 48 | int64_t(b[2]) << 40
 			   | int64_t(b[3]) << 32 | int64_t(b[4]) << 24 | int64_t(b[5]) << 16
 			   | int64_t(b[6]) << 8 | int64_t(b[7]);
@@ -123,22 +138,30 @@ class UdpListener {
 		}
 
 		switch (buf[0]) {
-		// OK
-		case 1: break;
+		// PING
+		case 1: send(udp_fd, PONG, 1, 0); break;
 
 		// allocated bandwidth
 		case 2: {
-			int64_t bandwidth = read_int64_be(buf + 1, n - 1);
-			printf("bandwidth = %ld\n", bandwidth);
-			arbiter_bandwidth.store(bandwidth);
+			unsigned char *cur = buf + 1;
+			size_t sz = n - 1;
+
+			int64_t bandwidth = read_int64_be(&cur, &sz);
+			arbiter_bandwidth.store(bandwidth, std::memory_order_relaxed);
+
+			uint8_t _tin = read_int8_be(&cur, &sz);
+
+			int64_t ts = read_int64_be(&cur, &sz);
+			auto now = std::chrono::duration_cast<std::chrono::microseconds>(
+						   std::chrono::system_clock::now().time_since_epoch())
+						   .count();
+
+			fprintf(stderr, "bandwidth = %ld at %ld µs\n", bandwidth, now - ts);
 			break;
 		}
 
-		// PING
-		case 3: send(udp_fd, PONG, 1, 0); break;
-
 		// FULL
-		case 4:
+		case 3:
 			printf("NETWORK IS FULL\n");
 			exit(1);
 			break;
@@ -150,6 +173,7 @@ class UdpListener {
 	void sendRequest(struct Request req) {
 		BufferWriter w;
 		w.write<uint8_t>(1);
+		w.write<uint64_t>(getpid());
 		w.write<int64_t>(req.min_bandwidth);
 		w.write<int64_t>(req.max_bandwidth);
 		w.write<uint8_t>(req.priority);
@@ -169,7 +193,7 @@ class UdpListener {
 
 		sendRequest({
 			.min_bandwidth = 1,
-			.max_bandwidth = arbiter_bandwidth.load(),
+			.max_bandwidth = get_bandwidth(),
 			.priority = 1,
 		});
 

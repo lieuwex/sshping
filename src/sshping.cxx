@@ -67,7 +67,7 @@
 
 #define _CKERR(E)       \
     if ((E) != 0) {     \
-        fprintf(stderr, "*** Option set error: %s\n", ssh_get_error(ses));  \
+        fprintf(stderr, "%d   *** Option set error: %s\n", __LINE__, ssh_get_error(ses));  \
         return 0;       \
     }
 
@@ -544,7 +544,7 @@ ssh_session begin_session() {
     if (user) {
         _CKERR(ssh_options_set(ses, SSH_OPTIONS_USER, user));
     }
-    if (contim) {
+    if (false&&contim) {
         _CKERR(ssh_options_set(ses, SSH_OPTIONS_TIMEOUT, &contim));
         _CKERR(ssh_options_set(ses, SSH_OPTIONS_TIMEOUT_USEC, &zero));
     }
@@ -633,7 +633,7 @@ ssh_channel login_channel(ssh_session & ses) {
 // Run a single-character-at-a-time echo test
 int run_echo_test(ssh_channel &chn) {
 	UdpListener l(10'0000);
-	l.start(34254);
+	l.start();
 
     // Start the echo server
     echo_cmd += "\n";
@@ -667,7 +667,7 @@ int run_echo_test(ssh_channel &chn) {
             uint64_t delta_ns = nsec_diff(tbf_last_update_ns, tbf_current_time_ns);
             tbf_last_update_ns = tbf_current_time_ns; // Mark time as accounted for
 
-            int64_t current_rate_bps = l.arbiter_bandwidth.load();
+            int64_t current_rate_bps = l.get_bandwidth();
 
             if (current_rate_bps > 0) {
                 // Add new tokens based on elapsed time and rate
@@ -681,6 +681,7 @@ int run_echo_test(ssh_channel &chn) {
             }
             // If current_rate_bps is zero or negative, no new tokens are generated.
 
+			//printf("%ld\n", tbf_tokens);
             if (tbf_tokens >= bytes_to_send_this_op) {
                 tbf_tokens -= bytes_to_send_this_op;
                 token_acquired = true;
@@ -705,16 +706,7 @@ int run_echo_test(ssh_channel &chn) {
                     ns_to_wait = 10 * 1000000; // 10 milliseconds
                 }
 
-                // Ensure the sleep doesn't extend beyond the overall time limit 'endt'
-                uint64_t expected_wakeup_time = tbf_current_time_ns + ns_to_wait;
-                if (expected_wakeup_time > endt) {
-                    if (endt > tbf_current_time_ns) {
-                        ns_to_wait = endt - tbf_current_time_ns; // Sleep only for the remaining time
-                    } else {
-                        ns_to_wait = 0; // Already past end time, don't sleep
-                    }
-                }
-
+				//printf("we are sleeping for: %ldns\n", ns_to_wait);
                 if (ns_to_wait > 0) {
                     struct timespec sleep_duration;
                     sleep_duration.tv_sec = ns_to_wait / GIGA;
@@ -732,7 +724,7 @@ int run_echo_test(ssh_channel &chn) {
             fprintf(stderr, "\n*** write put %d bytes, expected 1\n", nbytes);
             return SSH_ERROR;
         }
-        nbytes = ssh_channel_read_timeout(chn, &rbuf, 1, /*is-stderr*/ 0, -1 /*timeout, e.g. 1000ms*/);
+        nbytes = ssh_channel_read_timeout(chn, &rbuf, 1, /*is-stderr*/ 0, 2500);
         if (nbytes != 1) {
             fprintf(stderr, "\n*** read got %d bytes, expected 1 (got %.*s)\n", nbytes, nbytes > 0 ? nbytes : 0, rbuf);
             return SSH_ERROR;
