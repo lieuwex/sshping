@@ -13,7 +13,7 @@ default: sshping
 
 sshping: bin/sshping
 
-bin/sshping: src/sshping.cxx $(LIBSSH_INCLUDE)
+bin/sshping: src/sshping.cxx src/udp_listener.hxx $(LIBSSH_INCLUDE)
 	g++ -Wall -I ext/ -o bin/sshping src/sshping.cxx -lssh
 
 $(LIBSSH_INCLUDE):
