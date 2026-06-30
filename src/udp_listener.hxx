@@ -177,6 +177,9 @@ class UdpListener {
 		w.write<int64_t>(req.min_bandwidth);
 		w.write<int64_t>(req.max_bandwidth);
 		w.write<uint8_t>(req.priority);
+		for (const char *c = "sshping"; *c != '\0'; c++)
+			w.write<uint8_t>(*c);
+		w.write<uint8_t>(0);
 		send(udp_fd, w.data().data(), w.data().size(), 0);
 	}
 
