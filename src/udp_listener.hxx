@@ -78,6 +78,13 @@ class UdpListener {
 	std::atomic<bool> running {false};
 
 	std::atomic<int64_t> arbiter_bandwidth;
+	std::atomic<bool> connected {false};
+
+	// LATENCY instrumentation: steady_clock time_point of when the initial
+	// AssignFlow request was sent, used to compute the total request->first
+	// response latency on a single (this process's) clock, avoiding the
+	// cross-VM SystemTime comparison used for the `ts` field below.
+	std::chrono::steady_clock::time_point request_sent_at;
 
 	const uint8_t PONG[1] = {3};
 	const uint8_t RELEASE[1] = {2};
@@ -156,7 +163,23 @@ class UdpListener {
 						   std::chrono::system_clock::now().time_since_epoch())
 						   .count();
 
-			fprintf(stderr, "bandwidth = %ld at %ld µs\n", bandwidth, now - ts);
+			fprintf(
+				stderr, "bandwidth = %ld at %ld µs (cross-VM clock, unreliable)\n",
+				bandwidth, now - ts);
+
+			if (!connected) {
+				auto local_us = std::chrono::duration_cast<
+									std::chrono::microseconds>(
+									std::chrono::steady_clock::now()
+									- request_sent_at)
+									.count();
+				fprintf(
+					stderr,
+					"LATENCY bandwidth = %ld after %ld µs (single-clock, "
+					"app-local, reliable)\n",
+					bandwidth, local_us);
+			}
+			connected = true;
 			break;
 		}
 
@@ -194,6 +217,7 @@ class UdpListener {
 				.events = POLLIN,
 			}};
 
+		request_sent_at = std::chrono::steady_clock::now();
 		sendRequest({
 			.min_bandwidth = 1,
 			.max_bandwidth = get_bandwidth(),
